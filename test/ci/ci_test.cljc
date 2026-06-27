@@ -1,0 +1,204 @@
+(ns ci.ci-test
+  (:require [clojure.test  :refer [deftest is testing]]
+            [ci.model      :as m]
+            [ci.validate   :as v]
+            [ci.yaml       :as y]
+            [ci.execute    :as e]))
+
+;; ---------------------------------------------------------------------------
+;; Shared fixture data
+;; ---------------------------------------------------------------------------
+
+(def raw-data
+  "A GitHub Actions YAML map as a YAML parser would produce (string keys)."
+  {"name" "CI"
+   "on"   {"push" {"branches" ["main"]} "pull_request" {}}
+   "jobs" {"build" {"runs-on" "ubuntu-latest"
+                    "steps"   [{"uses" "actions/checkout@v4"}
+                               {"run"  "make"}]}
+           "test"  {"runs-on" "ubuntu-latest"
+                    "needs"   "build"
+                    "steps"   [{"run" "make test"}]}
+           "lint"  {"runs-on" "ubuntu-latest"
+                    "needs"   ["build"]
+                    "steps"   [{"run" "make lint"}]}}})
+
+(defn sample-model []
+  (y/from-data raw-data))
+
+;; ---------------------------------------------------------------------------
+;; Test 1 — from-data produces a well-formed model
+;; ---------------------------------------------------------------------------
+
+(deftest from-data-produces-model
+  (let [wf (sample-model)]
+    (is (= "CI" (:ci/name wf)))
+    (is (= {"push" {"branches" ["main"]} "pull_request" {}}
+           (:ci/on wf)))
+    (is (= #{"build" "test" "lint"} (set (keys (:ci/jobs wf)))))
+    (is (= "ubuntu-latest" (:ci/runs-on (m/job wf "build"))))))
+
+;; ---------------------------------------------------------------------------
+;; Test 2 — needs normalisation: bare string and list both become vector
+;; ---------------------------------------------------------------------------
+
+(deftest needs-normalised-to-vector
+  (let [wf (sample-model)]
+    ;; "build" has no needs
+    (is (= [] (m/needs wf "build")))
+    ;; "test" had needs as a bare string "build"
+    (is (= ["build"] (m/needs wf "test")))
+    ;; "lint" had needs as a list ["build"]
+    (is (= ["build"] (m/needs wf "lint")))))
+
+;; ---------------------------------------------------------------------------
+;; Test 3 — DAG queries: job / jobs / dependents
+;; ---------------------------------------------------------------------------
+
+(deftest dag-queries
+  (let [wf (sample-model)]
+    (testing "job lookup"
+      (is (= "build" (:ci/id (m/job wf "build"))))
+      (is (nil? (m/job wf "ghost"))))
+    (testing "jobs returns all"
+      (is (= 3 (count (m/jobs wf)))))
+    (testing "dependents of build = test and lint (sorted)"
+      (is (= ["lint" "test"] (m/dependents wf "build"))))
+    (testing "dependents of leaf job = empty"
+      (is (= [] (m/dependents wf "test"))))))
+
+;; ---------------------------------------------------------------------------
+;; Test 4 — topo-order is correct and deterministic
+;; ---------------------------------------------------------------------------
+
+(deftest topo-order-correct
+  (let [wf  (sample-model)
+        ord (m/topo-order wf)]
+    ;; build must come before test and lint
+    (is (vector? ord))
+    (is (= "build" (first ord)))
+    (is (= #{"test" "lint"} (set (rest ord))))))
+
+;; ---------------------------------------------------------------------------
+;; Test 5 — plan produces correct wave structure
+;; ---------------------------------------------------------------------------
+
+(deftest plan-waves-correct
+  (let [wf    (sample-model)
+        waves (e/plan wf)]
+    ;; first wave: build (no dependencies)
+    (is (= ["build"] (first waves)))
+    ;; second wave: lint and test run in parallel (both need build only)
+    (is (= ["lint" "test"] (second waves)))
+    (is (= 2 (count waves)))))
+
+;; ---------------------------------------------------------------------------
+;; Test 6 — two independent jobs share a wave
+;; ---------------------------------------------------------------------------
+
+(deftest independent-jobs-share-wave
+  (let [wf    (-> (m/workflow "W")
+                  (m/add-job (m/make-job "a" {:runs-on "ubuntu-latest"
+                                              :steps   [{:ci/run "echo a"}]}))
+                  (m/add-job (m/make-job "b" {:runs-on "ubuntu-latest"
+                                              :steps   [{:ci/run "echo b"}]}))
+                  (m/add-job (m/make-job "c" {:runs-on "ubuntu-latest"
+                                              :needs   ["a" "b"]
+                                              :steps   [{:ci/run "echo c"}]})))
+        waves (e/plan wf)]
+    (is (= 2 (count waves)))
+    (is (= ["a" "b"] (first waves)))
+    (is (= ["c"] (second waves)))))
+
+;; ---------------------------------------------------------------------------
+;; Test 7 — dangling needs reference → validate error
+;; ---------------------------------------------------------------------------
+
+(deftest dangling-needs-is-error
+  (let [wf (-> (m/workflow "W")
+               (m/add-job (m/make-job "test" {:runs-on "ubuntu-latest"
+                                              :needs   ["ghost"]
+                                              :steps   [{:ci/run "make test"}]})))
+        ps (v/problems wf)]
+    (is (not (v/valid? wf)))
+    (is (some #(= :job/dangling-need (:ci/code %)) ps))))
+
+;; ---------------------------------------------------------------------------
+;; Test 8 — cyclic DAG → validate error + plan returns sentinel
+;; ---------------------------------------------------------------------------
+
+(deftest cycle-yields-error-and-sentinel
+  (let [wf (-> (m/workflow "W")
+               (m/add-job (m/make-job "a" {:runs-on "ubuntu-latest"
+                                           :needs   ["b"]
+                                           :steps   [{:ci/run "a"}]}))
+               (m/add-job (m/make-job "b" {:runs-on "ubuntu-latest"
+                                           :needs   ["a"]
+                                           :steps   [{:ci/run "b"}]})))]
+    (testing "validate reports a cycle error"
+      (is (not (v/valid? wf)))
+      (is (some #(= :dag/cycle (:ci/code %)) (v/problems wf))))
+    (testing "plan returns the cycle sentinel map"
+      (let [result (e/plan wf)]
+        (is (map? result))
+        (is (contains? result :ci/cycle))))))
+
+;; ---------------------------------------------------------------------------
+;; Test 9 — step with both :ci/uses and :ci/run → validate error
+;; ---------------------------------------------------------------------------
+
+(deftest step-uses-and-run-is-error
+  (let [wf (-> (m/workflow "W")
+               (m/add-job {:ci/id      "bad"
+                            :ci/runs-on "ubuntu-latest"
+                            :ci/needs   []
+                            :ci/steps   [{:ci/uses "actions/checkout@v4"
+                                          :ci/run  "echo also"}]}))
+        ps (v/problems wf)]
+    (is (not (v/valid? wf)))
+    (is (some #(= :step/uses-and-run (:ci/code %)) ps))))
+
+;; ---------------------------------------------------------------------------
+;; Test 10 — step with neither :ci/uses nor :ci/run → validate error
+;; ---------------------------------------------------------------------------
+
+(deftest step-no-action-is-error
+  (let [wf (-> (m/workflow "W")
+               (m/add-job {:ci/id      "bad"
+                            :ci/runs-on "ubuntu-latest"
+                            :ci/needs   []
+                            :ci/steps   [{:ci/name "oops"}]}))
+        ps (v/problems wf)]
+    (is (not (v/valid? wf)))
+    (is (some #(= :step/no-action (:ci/code %)) ps))))
+
+;; ---------------------------------------------------------------------------
+;; Test 11 — valid model passes validation; missing runs-on is only a warning
+;; ---------------------------------------------------------------------------
+
+(deftest valid-model-and-missing-runs-on-warn
+  (testing "well-formed workflow is valid"
+    (is (v/valid? (sample-model))))
+  (testing "missing :ci/runs-on is a warning, not an error"
+    (let [wf (-> (m/workflow "W")
+                 (m/add-job {:ci/id    "j"
+                              :ci/needs []
+                              :ci/steps [{:ci/run "echo hi"}]}))
+          ps (v/problems wf)]
+      (is (v/valid? wf) "no :error so still valid")
+      (is (some #(= :job/missing-runs-on (:ci/code %)) ps)))))
+
+;; ---------------------------------------------------------------------------
+;; Test 12 — to-data round-trips the model back to string-keyed map
+;; ---------------------------------------------------------------------------
+
+(deftest to-data-round-trips
+  (let [wf     (sample-model)
+        result (y/to-data wf)]
+    (is (= "CI" (get result "name")))
+    (is (= "ubuntu-latest" (get-in result ["jobs" "build" "runs-on"])))
+    ;; needs should be present for jobs that have them
+    (is (= ["build"] (get-in result ["jobs" "test" "needs"])))
+    ;; steps round-trip
+    (is (= "actions/checkout@v4"
+           (get-in result ["jobs" "build" "steps" 0 "uses"])))))
