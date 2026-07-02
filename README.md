@@ -125,5 +125,5 @@ rather than a wave vector. Pure — no ports, no I/O.
 ## Test
 
 ```
-clojure -X:test
+clojure -M:test
 ```
