@@ -4,4 +4,3 @@
 target/
 *.class
 .DS_Store
-.cpcache/
