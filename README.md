@@ -76,7 +76,8 @@ When a cycle exists, `topo-order` returns a `{:ci/cycle [...]}` sentinel
 ```
 
 Errors: a job's `:ci/needs` references a non-existent job; the job DAG is
-cyclic; a step carries both `:ci/uses` and `:ci/run`, or neither.
+cyclic; a step carries more or less than one action among `:ci/uses`,
+`:ci/run`, and the shell-free `:ci/argv` form.
 Warnings: a job has no `:ci/runs-on`.
 
 ## YAML data I/O (`ci.yaml`)
@@ -121,6 +122,13 @@ jobs that can run in parallel once all prior waves have completed:
 
 When the DAG has a cycle, `plan` returns the `{:ci/cycle [...]}` sentinel
 rather than a wave vector. Pure — no ports, no I/O.
+
+## Portable run state (`ci.run`)
+
+`new-run` binds an immutable source descriptor to a validated workflow and its
+wave plan. `transition` permits only legal queued/leased/running/terminal
+transitions, increments a revision, and appends plain-data events. Clocks,
+persistence, execution, and receipt signing remain host responsibilities.
 
 ## Test
 
