@@ -3,7 +3,8 @@
             [ci.model      :as m]
             [ci.validate   :as v]
             [ci.yaml       :as y]
-            [ci.execute    :as e]))
+            [ci.execute    :as e]
+            [ci.run        :as run]))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared fixture data
@@ -156,7 +157,7 @@
                                           :ci/run  "echo also"}]}))
         ps (v/problems wf)]
     (is (not (v/valid? wf)))
-    (is (some #(= :step/uses-and-run (:ci/code %)) ps))))
+    (is (some #(= :step/multiple-actions (:ci/code %)) ps))))
 
 ;; ---------------------------------------------------------------------------
 ;; Test 10 — step with neither :ci/uses nor :ci/run → validate error
@@ -202,3 +203,28 @@
     ;; steps round-trip
     (is (= "actions/checkout@v4"
            (get-in result ["jobs" "build" "steps" 0 "uses"])))))
+
+(deftest portable-run-state-machine
+  (let [r0 (run/new-run "run-1" {:kotoba/commit "bafy-source"} (sample-model))
+        r1 (run/transition r0 :leased {:runner/id "did:key:zRunner"})
+        r2 (run/transition r1 :running)
+        r3 (run/transition r2 :passed {:receipt/cid "bafy-receipt"})]
+    (is (= :queued (:ci.run/state r0)))
+    (is (= [["build"] ["lint" "test"]] (:ci.run/plan r0)))
+    (is (= 3 (:ci.run/revision r3)))
+    (is (run/terminal? r3))
+    (is (= "bafy-receipt" (get-in r3 [:ci.run/events 2 :ci.event/data :receipt/cid]))))
+  (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                        #"illegal run state transition"
+                        (run/transition (run/new-run "run-2" {} (sample-model)) :passed))))
+
+(deftest argv-is-a-valid-shell-free-step-action
+  (let [wf (-> (m/workflow "W")
+               (m/add-job (m/make-job "test" {:runs-on "linux"
+                                               :steps [{:ci/argv ["clojure" "-M:test"]}]})))]
+    (is (v/valid? wf)))
+  (let [wf (-> (m/workflow "W")
+               (m/add-job (m/make-job "bad" {:runs-on "linux"
+                                              :steps [{:ci/run "make"
+                                                       :ci/argv ["make"]}]})))]
+    (is (some #(= :step/multiple-actions (:ci/code %)) (v/problems wf)))))

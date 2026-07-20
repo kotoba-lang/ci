@@ -23,17 +23,20 @@
       (when-not (:ci/runs-on job)
         (conj! ps (problem :warn :job/missing-runs-on id
                            (str "job \"" id "\" has no :ci/runs-on"))))
-      ;; each step must have EXACTLY one of :ci/uses / :ci/run
+      ;; each step must have EXACTLY one action. :ci/argv is the shell-free
+      ;; portable/Murakumo form; :ci/run and :ci/uses preserve Actions I/O.
       (doseq [step (:ci/steps job)]
         (let [has-uses (contains? step :ci/uses)
-              has-run  (contains? step :ci/run)]
+              has-run  (contains? step :ci/run)
+              has-argv (contains? step :ci/argv)
+              actions (count (filter true? [has-uses has-run has-argv]))]
           (cond
-            (and has-uses has-run)
-            (conj! ps (problem :error :step/uses-and-run id
-                               (str "job \"" id "\" has a step with both :ci/uses and :ci/run")))
-            (and (not has-uses) (not has-run))
+            (> actions 1)
+            (conj! ps (problem :error :step/multiple-actions id
+                               (str "job \"" id "\" has a step with multiple actions")))
+            (zero? actions)
             (conj! ps (problem :error :step/no-action id
-                               (str "job \"" id "\" has a step with neither :ci/uses nor :ci/run")))))))
+                               (str "job \"" id "\" has a step with no action")))))))
     ;; job DAG must be acyclic
     (let [order (m/topo-order model)]
       (when (map? order)
