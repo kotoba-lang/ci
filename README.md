@@ -133,5 +133,5 @@ persistence, execution, and receipt signing remain host responsibilities.
 ## Test
 
 ```
-clojure -M:test
+kbb -M:test
 ```

@@ -221,7 +221,7 @@
 (deftest argv-is-a-valid-shell-free-step-action
   (let [wf (-> (m/workflow "W")
                (m/add-job (m/make-job "test" {:runs-on "linux"
-                                               :steps [{:ci/argv ["clojure" "-M:test"]}]})))]
+                                               :steps [{:ci/argv ["kbb" "-M:test"]}]})))]
     (is (v/valid? wf)))
   (let [wf (-> (m/workflow "W")
                (m/add-job (m/make-job "bad" {:runs-on "linux"
