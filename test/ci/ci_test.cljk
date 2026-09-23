@@ -1,5 +1,5 @@
 (ns ci.ci-test
-  (:require [clojure.test  :refer [deftest is testing]]
+  (:require [kotoba.test  :refer [deftest is testing]]
             [ci.model      :as m]
             [ci.validate   :as v]
             [ci.yaml       :as y]
